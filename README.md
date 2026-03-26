@@ -3,10 +3,10 @@
 
 pip install fastapi[all] python-multipart aiofiles ultralytics opencv-python
 
-## Run backend (from /home/scp619/LDB/App/)
+## Run backend 
 uvicorn main:app --host 0.0.0.0 --port 8000
 
-## Build Flutter app (from /home/scp619/LDB/App/)
+## Build Flutter app
 flutter create . --project-name hockey_highlights
 flutter pub get
 flutter run
