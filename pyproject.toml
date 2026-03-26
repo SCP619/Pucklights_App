@@ -1,0 +1,30 @@
+[project]
+name = "hockey-highlights"
+version = "0.1.0"
+description = "ice hockey highlight extractor"
+authors = [{ name = "scp619" }]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[all]",
+    "python-multipart",
+    "aiofiles",
+    "ultralytics",
+    "opencv-python",
+    "imageio-ffmpeg",
+]
+
+[dependency-groups]
+dev = ["poethepoet"]
+
+[tool.poe.tasks]
+# --- Backend Commands ---
+backend = "uvicorn main:app --host 0.0.0.0 --port 8000"
+
+# --- Flutter Commands ---
+# Mirrors the build steps in your source files [cite: 1, 2]
+flutter-setup = "flutter create . --project-name hockey_highlights"
+flutter-deps = "flutter pub get"
+flutter-run = "flutter run -d linux"
+
+# --- Full Setup ---
+setup-all = ["flutter-setup", "flutter-deps"]

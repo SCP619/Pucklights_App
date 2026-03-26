@@ -1,0 +1,7 @@
+main.py
+pyproject.toml
+hockey_highlights.egg-info/PKG-INFO
+hockey_highlights.egg-info/SOURCES.txt
+hockey_highlights.egg-info/dependency_links.txt
+hockey_highlights.egg-info/requires.txt
+hockey_highlights.egg-info/top_level.txt

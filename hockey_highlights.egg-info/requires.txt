@@ -1,0 +1,6 @@
+fastapi[all]
+python-multipart
+aiofiles
+ultralytics
+opencv-python
+imageio-ffmpeg
