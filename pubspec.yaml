@@ -1,0 +1,21 @@
+name: hockey_highlights
+description: ice hockey highlight extractor
+publish_to: none
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  image_picker: ^1.1.2        # Pick video from device gallery
+  video_player: ^2.9.2        # Play highlight clips inline
+  dio: ^5.7.0                 # Upload with progress + download
+  path_provider: ^2.1.4       # Temp directory for downloaded clips
+  permission_handler: ^11.3.1 # Storage / photo permissions
+  gal: ^2.3.0                 # Save videos to device gallery
+  shared_preferences: ^2.3.2  # Remember server IP between sessions
+
+flutter:
+  uses-material-design: true
