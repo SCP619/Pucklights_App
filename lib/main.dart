@@ -54,17 +54,22 @@ class MainShell extends StatefulWidget {
 
 class _MainShellState extends State<MainShell> {
   int _tab = 0;
-  String _serverIp = '192.168.1.100';
+  String _serverUrl = 'http://127.0.0.1:8000';
   List<Map<String, dynamic>> _highlights = [];
   final Set<String> _favorites = {};
 
-  String get _baseUrl => 'http://$_serverIp:8000';
+  String get _baseUrl => _serverUrl.replaceAll(RegExp(r'/+$'), '');
 
   @override
   void initState() {
     super.initState();
     SharedPreferences.getInstance().then((p) {
-      setState(() => _serverIp = p.getString('server_ip') ?? '192.168.1.100');
+      final saved = p.getString('server_url');
+      setState(() => _serverUrl = saved ?? '');
+      // First launch — open settings so user can enter the server URL
+      if (saved == null || saved.isEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _showSettings());
+      }
     });
   }
 
@@ -76,31 +81,35 @@ class _MainShellState extends State<MainShell> {
   });
 
   void _showSettings() {
-    final ctrl = TextEditingController(text: _serverIp);
+    final ctrl = TextEditingController(text: _serverUrl);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kCard,
-        title: const Text('Server IP', style: TextStyle(color: kWhite)),
+        title: const Text('Server URL', style: TextStyle(color: kWhite)),
         content: TextField(
           controller: ctrl,
           style: const TextStyle(color: kWhite),
           decoration: const InputDecoration(
-            hintText: '192.168.1.100',
+            hintText: 'https://xxxx.trycloudflare.com',
             hintStyle: TextStyle(color: kGrey),
+            helperText: 'Cloudflare: https://xxxx.trycloudflare.com\nUSB only: http://127.0.0.1:8000',
+            helperStyle: TextStyle(color: kGrey, fontSize: 11),
+            helperMaxLines: 2,
             enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: kGrey)),
             focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: kOrange)),
           ),
-          keyboardType: TextInputType.number,
+          keyboardType: TextInputType.url,
+          autocorrect: false,
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: kGrey))),
           TextButton(
             onPressed: () async {
-              final ip = ctrl.text.trim();
+              final url = ctrl.text.trim();
               final prefs = await SharedPreferences.getInstance();
-              await prefs.setString('server_ip', ip);
-              setState(() => _serverIp = ip);
+              await prefs.setString('server_url', url);
+              setState(() => _serverUrl = url);
               if (ctx.mounted) Navigator.pop(ctx);
             },
             child: const Text('Save', style: TextStyle(color: kOrange)),
@@ -195,9 +204,20 @@ class _UploadTabState extends State<UploadTab> {
 
   Future<void> _upload() async {
     if (_file == null) return;
+    if (widget.baseUrl.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Set a server URL first — tap the profile icon.'),
+        backgroundColor: Colors.orange));
+      return;
+    }
     setState(() { _uploading = true; _progress = 0; });
     try {
-      final res = await Dio().post(
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 30),
+        sendTimeout: const Duration(minutes: 10),   // large video uploads can take time
+        receiveTimeout: const Duration(seconds: 60),
+      ));
+      final res = await dio.post(
         '${widget.baseUrl}/upload',
         data: FormData.fromMap({
           'file': await MultipartFile.fromFile(_file!.path, filename: 'hockey.mp4'),
@@ -215,8 +235,12 @@ class _UploadTabState extends State<UploadTab> {
         ),
       ));
     } on DioException catch (e) {
+      final msg = 'Upload failed\ntype: ${e.type.name}\nstatus: ${e.response?.statusCode}\nerror: ${e.error}';
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: ${e.message}'), backgroundColor: Colors.red));
+        SnackBar(content: Text(msg), backgroundColor: Colors.red, duration: const Duration(seconds: 12)));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Upload failed: $e'), backgroundColor: Colors.red, duration: const Duration(seconds: 12)));
     } finally {
       if (mounted) setState(() => _uploading = false);
     }
@@ -391,7 +415,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 // ─────────────────────────────────────────────────────────────────────────────
 // HIGHLIGHTS TAB
 // ─────────────────────────────────────────────────────────────────────────────
-class HighlightsTab extends StatelessWidget {
+class HighlightsTab extends StatefulWidget {
   final String baseUrl;
   final List<Map<String, dynamic>> highlights;
   final Set<String> favorites;
@@ -400,7 +424,29 @@ class HighlightsTab extends StatelessWidget {
   const HighlightsTab({super.key, required this.baseUrl, required this.highlights,
       required this.favorites, required this.onToggleFavorite});
 
-  Future<void> _saveAll(BuildContext context) async {
+  @override
+  State<HighlightsTab> createState() => _HighlightsTabState();
+}
+
+class _HighlightsTabState extends State<HighlightsTab> {
+  final Set<String> _selected = {};
+
+  @override
+  void didUpdateWidget(HighlightsTab old) {
+    super.didUpdateWidget(old);
+    // Clear selection when a new batch of highlights arrives
+    if (old.highlights != widget.highlights) _selected.clear();
+  }
+
+  void _toggleSelect(String filename) =>
+      setState(() => _selected.contains(filename) ? _selected.remove(filename) : _selected.add(filename));
+
+  Future<void> _save(BuildContext context) async {
+    // If nothing checked → save all; otherwise save only checked ones
+    final toSave = _selected.isEmpty
+        ? widget.highlights
+        : widget.highlights.where((h) => _selected.contains(h['filename'])).toList();
+
     if (Platform.isAndroid || Platform.isIOS) {
       await Permission.photos.request();
       if (Platform.isAndroid) await Permission.storage.request();
@@ -409,7 +455,6 @@ class HighlightsTab extends StatelessWidget {
     final dio = Dio();
     int saved = 0;
 
-    // On Linux/desktop, save to ~/Videos; on mobile save to gallery via Gal.
     Directory saveDir;
     if (Platform.isAndroid || Platform.isIOS) {
       saveDir = await getTemporaryDirectory();
@@ -419,14 +464,12 @@ class HighlightsTab extends StatelessWidget {
       if (!saveDir.existsSync()) saveDir = Directory(home);
     }
 
-    for (final h in highlights) {
-      final url = (h['url'] as String).startsWith('http') ? h['url'] as String : '$baseUrl${h['url']}';
+    for (final h in toSave) {
+      final url = (h['url'] as String).startsWith('http') ? h['url'] as String : '${widget.baseUrl}${h['url']}';
       final local = '${saveDir.path}/${h['filename']}';
       try {
         await dio.download(url, local);
-        if (Platform.isAndroid || Platform.isIOS) {
-          await Gal.putVideo(local);
-        }
+        if (Platform.isAndroid || Platform.isIOS) await Gal.putVideo(local);
         saved++;
       } catch (e) { debugPrint('Save error: $e'); }
     }
@@ -440,31 +483,38 @@ class HighlightsTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (highlights.isEmpty) {
+    if (widget.highlights.isEmpty) {
       return const Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
         Icon(Icons.play_circle_outline_rounded, size: 72, color: kGrey),
         SizedBox(height: 16),
         Text('No highlights yet', style: TextStyle(color: kGrey, fontSize: 16)),
         SizedBox(height: 8),
-        Text('Upload a game video to extract goals',
+        Text('Upload a game video to extract highlights',
             style: TextStyle(color: Color(0xFF4A5C7A), fontSize: 13)),
       ]));
     }
+
+    final btnLabel = _selected.isEmpty
+        ? 'Save All to Gallery'
+        : 'Save ${_selected.length} Selected';
 
     return Column(children: [
       Expanded(
         child: ListView.builder(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-          itemCount: highlights.length,
+          itemCount: widget.highlights.length,
           itemBuilder: (ctx, i) {
-            final h   = highlights[i];
-            final url = (h['url'] as String).startsWith('http') ? h['url'] as String : '$baseUrl${h['url']}';
+            final h   = widget.highlights[i];
+            final url = (h['url'] as String).startsWith('http') ? h['url'] as String : '${widget.baseUrl}${h['url']}';
+            final fn  = h['filename'] as String;
             return Padding(
               padding: const EdgeInsets.only(bottom: 16),
               child: _HighlightListCard(
                 index: i, highlight: h, videoUrl: url,
-                isFavorite: favorites.contains(h['filename'] as String),
-                onToggleFavorite: () => onToggleFavorite(h['filename'] as String),
+                isFavorite: widget.favorites.contains(fn),
+                isSelected: _selected.contains(fn),
+                onToggleFavorite: () => widget.onToggleFavorite(fn),
+                onToggleSelect:   () => _toggleSelect(fn),
               ),
             );
           },
@@ -473,8 +523,12 @@ class HighlightsTab extends StatelessWidget {
       SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-          child: _PillButton(label: 'Save All to Gallery', onTap: () => _saveAll(context),
-              color: kOrange, textColor: Colors.black),
+          child: _PillButton(
+            label: btnLabel,
+            onTap: () => _save(context),
+            color: kOrange,
+            textColor: Colors.black,
+          ),
         ),
       ),
     ]);
@@ -516,7 +570,9 @@ class FavoritesTab extends StatelessWidget {
           child: _HighlightListCard(
             index: i, highlight: h, videoUrl: url,
             isFavorite: favorites.contains(h['filename'] as String),
+            isSelected: false,
             onToggleFavorite: () => onToggleFavorite(h['filename'] as String),
+            onToggleSelect: () {},
           ),
         );
       },
@@ -532,10 +588,13 @@ class _HighlightListCard extends StatefulWidget {
   final Map<String, dynamic> highlight;
   final String videoUrl;
   final bool isFavorite;
+  final bool isSelected;
   final VoidCallback onToggleFavorite;
+  final VoidCallback onToggleSelect;
 
   const _HighlightListCard({required this.index, required this.highlight, required this.videoUrl,
-      required this.isFavorite, required this.onToggleFavorite});
+      required this.isFavorite, required this.isSelected,
+      required this.onToggleFavorite, required this.onToggleSelect});
 
   @override
   State<_HighlightListCard> createState() => _HighlightListCardState();
@@ -592,6 +651,20 @@ class _HighlightListCardState extends State<_HighlightListCard> {
   @override
   Widget build(BuildContext context) {
     return Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+      // Checkbox
+      SizedBox(
+        width: 36,
+        child: Checkbox(
+          value: widget.isSelected,
+          onChanged: (_) => widget.onToggleSelect(),
+          activeColor: kOrange,
+          checkColor: Colors.black,
+          side: const BorderSide(color: kGrey, width: 1.5),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+        ),
+      ),
+      const SizedBox(width: 6),
+
       // Card (~65% width)
       Expanded(
         flex: 13,
