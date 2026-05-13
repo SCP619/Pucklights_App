@@ -93,7 +93,7 @@ class _MainShellState extends State<MainShell> {
           decoration: const InputDecoration(
             hintText: 'https://xxxx.trycloudflare.com',
             hintStyle: TextStyle(color: kGrey),
-            helperText: 'Cloudflare: https://xxxx.trycloudflare.com\nUSB only: http://127.0.0.1:8000',
+            helperText: 'Cloudflare: https://xxxx.trycloudflare.com\nUSB only: http://10.0.2.2:8000',
             helperStyle: TextStyle(color: kGrey, fontSize: 11),
             helperMaxLines: 2,
             enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: kGrey)),
@@ -616,14 +616,22 @@ class _HighlightListCardState extends State<_HighlightListCard> {
     }
   }
 
+  // FIX: Added VideoControllerConfiguration with hardware acceleration disabled
+  // and a 300ms delay before opening media to give the Surface time to initialize
   Future<void> _toggleInline() async {
     if (_player == null) {
       _player = Player();
-      _controller = VideoController(_player!);
+      _controller = VideoController(
+        _player!,
+        configuration: const VideoControllerConfiguration(
+          enableHardwareAcceleration: false,
+        ),
+      );
       _player!.stream.playing.listen((p) {
         if (mounted) setState(() => _playing = p);
       });
       setState(() => _init = true);
+      await Future.delayed(const Duration(milliseconds: 300));
       await _player!.open(Media(widget.videoUrl));
     } else {
       await _player!.playOrPause();
@@ -676,7 +684,11 @@ class _HighlightListCardState extends State<_HighlightListCard> {
               aspectRatio: 16 / 9,
               child: Stack(fit: StackFit.expand, children: [
                 _init && _controller != null
-                    ? Video(controller: _controller!, controls: NoVideoControls)
+                    ? Video(
+                        controller: _controller!,
+                        controls: NoVideoControls,
+                        subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
+                      )
                     : Container(
                         color: kCard,
                         child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -737,12 +749,20 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
   late final Player _player;
   late final VideoController _controller;
 
+  // FIX: Hardware acceleration disabled + 300ms delay before open
   @override
   void initState() {
     super.initState();
     _player = Player();
-    _controller = VideoController(_player);
-    _player.open(Media(widget.videoUrl));
+    _controller = VideoController(
+      _player,
+      configuration: const VideoControllerConfiguration(
+        enableHardwareAcceleration: false,
+      ),
+    );
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) _player.open(Media(widget.videoUrl));
+    });
   }
 
   @override
@@ -765,6 +785,7 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
         child: Video(
           controller: _controller,
           controls: MaterialVideoControls,
+          subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
         ),
       ),
     );
