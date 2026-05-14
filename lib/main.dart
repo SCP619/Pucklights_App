@@ -725,10 +725,61 @@ class HighlightsTab extends StatefulWidget {
 class _HighlightsTabState extends State<HighlightsTab> {
   final Set<String> _selected = {};
 
+  Future<void> _combine(BuildContext context) async {
+    final filenames = _selected.isEmpty ? <String>[] : _selected.toList();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Combining videos…'), duration: Duration(seconds: 60)),
+    );
+
+    try {
+      final jobId = _extractJobId(widget.highlights.first['url'] as String);
+
+      final res = await Dio().post(
+        '${widget.baseUrl}/combine/$jobId',
+        data: {'job_id': jobId, 'filenames': filenames},
+      );
+
+      final url = res.data['url'] as String;
+      final filename = res.data['filename'] as String;
+      final fullUrl = url.startsWith('http') ? url : '${widget.baseUrl}$url';
+
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+
+      // Open fullscreen player with save option
+      Navigator.push(context, MaterialPageRoute(
+        builder: (_) => _FullscreenVideoPage(
+          videoUrl: fullUrl,
+          title: 'Full Highlight Reel',
+          baseUrl: widget.baseUrl,
+          filename: filename,
+          allowSave: true,
+        ),
+      ));
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Combine failed: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  /// Extracts job_id from a highlight URL like /highlights/<job_id>/<file>
+  String _extractJobId(String url) {
+    final parts = url.split('/');
+    // url format: /highlights/<job_id>/<filename>
+    final idx = parts.indexOf('highlights');
+    if (idx != -1 && idx + 1 < parts.length) return parts[idx + 1];
+    // fallback: second segment
+    return parts.length > 2 ? parts[2] : parts.last;
+  }
+
   @override
   void didUpdateWidget(HighlightsTab old) {
     super.didUpdateWidget(old);
-    // Clear selection when a new batch of highlights arrives
     if (old.highlights != widget.highlights) _selected.clear();
   }
 
@@ -736,7 +787,6 @@ class _HighlightsTabState extends State<HighlightsTab> {
       setState(() => _selected.contains(filename) ? _selected.remove(filename) : _selected.add(filename));
 
   Future<void> _save(BuildContext context) async {
-    // If nothing checked → save all; otherwise save only checked ones
     final toSave = _selected.isEmpty
         ? widget.highlights
         : widget.highlights.where((h) => _selected.contains(h['filename'])).toList();
@@ -817,12 +867,26 @@ class _HighlightsTabState extends State<HighlightsTab> {
       SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-          child: _PillButton(
-            label: btnLabel,
-            onTap: () => _save(context),
-            color: kOrange,
-            textColor: Colors.black,
-          ),
+          child: Row(children: [
+            Expanded(
+              child: _PillButton(
+                label: btnLabel,
+                onTap: () => _save(context),
+                color: kOrange,
+                textColor: Colors.black,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _PillButton(
+                label: _selected.isEmpty
+                    ? 'Combine All'
+                    : 'Combine ${_selected.length}',
+                onTap: () => _combine(context),
+                color: kBtn,
+              ),
+            ),
+          ]),
         ),
       ),
     ]);
@@ -910,8 +974,6 @@ class _HighlightListCardState extends State<_HighlightListCard> {
     }
   }
 
-  // FIX: Added VideoControllerConfiguration with hardware acceleration disabled
-  // and a 300ms delay before opening media to give the Surface time to initialize
   Future<void> _toggleInline() async {
     if (_player == null) {
       _player = Player();
@@ -1030,11 +1092,23 @@ class _HighlightListCardState extends State<_HighlightListCard> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FULLSCREEN VIDEO PAGE  (mobile only)
+// FULLSCREEN VIDEO PAGE
 // ─────────────────────────────────────────────────────────────────────────────
 class _FullscreenVideoPage extends StatefulWidget {
-  final String videoUrl, title;
-  const _FullscreenVideoPage({required this.videoUrl, required this.title});
+  final String videoUrl;
+  final String title;
+  final String? baseUrl;
+  final String? filename;
+  final bool allowSave;
+
+  const _FullscreenVideoPage({
+    required this.videoUrl,
+    required this.title,
+    this.baseUrl,
+    this.filename,
+    this.allowSave = false,
+  });
+
   @override
   State<_FullscreenVideoPage> createState() => _FullscreenVideoPageState();
 }
@@ -1042,8 +1116,8 @@ class _FullscreenVideoPage extends StatefulWidget {
 class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
   late final Player _player;
   late final VideoController _controller;
+  bool _saving = false;
 
-  // FIX: Hardware acceleration disabled + 300ms delay before open
   @override
   void initState() {
     super.initState();
@@ -1062,6 +1136,58 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
   @override
   void dispose() { _player.dispose(); super.dispose(); }
 
+  Future<void> _saveToGallery() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+
+    try {
+      if (Platform.isAndroid || Platform.isIOS) {
+        await Permission.photos.request();
+        if (Platform.isAndroid) await Permission.storage.request();
+      }
+
+      final tmpDir = await getTemporaryDirectory();
+      final filename = widget.filename ?? 'highlight_reel_${DateTime.now().millisecondsSinceEpoch}.mp4';
+      final localPath = '${tmpDir.path}/$filename';
+
+      await Dio().download(widget.videoUrl, localPath);
+
+      if (Platform.isAndroid || Platform.isIOS) {
+        await Gal.putVideo(localPath);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('✅ Highlight reel saved to gallery!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      } else {
+        final home = Platform.environment['HOME'] ?? '.';
+        final destDir = Directory('$home/Videos');
+        if (!destDir.existsSync()) destDir.createSync(recursive: true);
+        final dest = '${destDir.path}/$filename';
+        File(localPath).copySync(dest);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ Saved to $dest'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Save failed: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1074,6 +1200,27 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(widget.title, style: const TextStyle(color: kWhite, fontSize: 16)),
+        actions: [
+          if (widget.allowSave)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: _saving
+                  ? const Padding(
+                      padding: EdgeInsets.all(14),
+                      child: SizedBox(
+                        width: 20, height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2, color: kOrange,
+                        ),
+                      ),
+                    )
+                  : IconButton(
+                      icon: const Icon(Icons.download_rounded, color: kOrange),
+                      tooltip: 'Save to gallery',
+                      onPressed: _saveToGallery,
+                    ),
+            ),
+        ],
       ),
       body: Center(
         child: Video(

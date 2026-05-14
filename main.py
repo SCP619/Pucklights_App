@@ -13,6 +13,9 @@ Bugikorjaukset:
 - Pre-goal-framet kopioidaan turvaan heti maalin havaitsemishetkella,
   ennen kuin pyoriva puskuri ehtii poistaa ne (oli paasyyongelma)
 - _framebuf-hakemisto poistetaan shutil.rmtreella rmdir:n sijaan
+
+Transitiot:
+- combine-endpoint lisaa 0.5s fade-to-black -transitiot klippien valille
 """
 
 import cv2
@@ -34,6 +37,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from ultralytics import YOLO
 from pydantic import BaseModel
+from typing import List as PyList
 
 # -------------------------------------------------------------
 # CONFIG
@@ -62,6 +66,9 @@ BUFFER_JPEG_QUALITY = 80
 
 REBUILD_ENGINE = False
 ENGINE_IMGSZ   = 1280
+
+# Transitio-asetukset combine-endpointille
+TRANSITION_DURATION = 0.5   # sekuntia, fade-to-black klippien valilla
 
 # -------------------------------------------------------------
 # GLOBAALI TILA
@@ -149,7 +156,7 @@ def check_for_goal(r) -> bool:
         x_left  = gx_c - gw / 2
         x_right = gx_c + gw / 2
 
-        # FIX: Y alkaa keskeltä ja laajenee vain alaspäin
+        # FIX: Y alkaa keskelta ja laajenee vain alaspain
         y_top    = gy_c
         y_bottom = gy_c + gh
 
@@ -184,7 +191,7 @@ def annotate_frame(frame, r):
             x_left  = gx_c - gw / 2
             x_right = gx_c + gw / 2
 
-            # FIX: vain alaspäin
+            # FIX: vain alaspain
             y_top    = gy_c
             y_bottom = gy_c + gh
 
@@ -208,8 +215,6 @@ def annotate_frame(frame, r):
 
 # -------------------------------------------------------------
 # LEVYPUSKURI
-# Korvaa deque(annotated_frames): kirjoittaa jokaisen annotoidun
-# framen JPEG:na levylle, pitaa vain tiedostonimet muistissa.
 # -------------------------------------------------------------
 class DiskFrameBuffer:
     """
@@ -231,7 +236,6 @@ class DiskFrameBuffer:
         self._counter += 1
         self._names.append(name)
 
-        # Poista vanhin jos puskuri taynna
         if len(self._names) > self.maxlen:
             old = self._names.pop(0)
             try:
@@ -240,7 +244,6 @@ class DiskFrameBuffer:
                 pass
 
     def snapshot_paths(self) -> list[str]:
-        """Palauttaa absoluuttiset polut jarjestyksessa (vanhin ensin)."""
         return [str(self.tmpdir / n) for n in self._names]
 
     def start_frame_index(self, current_frame_idx: int) -> int:
@@ -316,6 +319,161 @@ def save_highlight_with_audio(
 
 
 # -------------------------------------------------------------
+# TRANSITIOT: fade-to-black klippien välille
+# -------------------------------------------------------------
+def _find_ffprobe() -> str | None:
+    """
+    Etsii ffprobe-binäärin useista paikoista.
+    Palauttaa polun tai None jos ei löydy.
+    """
+    candidates = []
+
+    # 1) Sama hakemisto kuin ffmpeg-binääri
+    ffmpeg_dir = os.path.dirname(FFMPEG)
+    for name in ("ffprobe.exe", "ffprobe"):
+        p = os.path.join(ffmpeg_dir, name)
+        if os.path.isfile(p):
+            candidates.append(p)
+
+    # 2) PATH
+    which = shutil.which("ffprobe")
+    if which:
+        candidates.append(which)
+
+    # 3) Venv bin (sama kuin ffmpeg-haku)
+    venv_bin = os.path.dirname(sys.executable)
+    for name in ("ffprobe.exe", "ffprobe"):
+        p = os.path.join(venv_bin, name)
+        if os.path.isfile(p):
+            candidates.append(p)
+
+    return candidates[0] if candidates else None
+
+
+def _get_video_duration(path: str) -> float:
+    """
+    Palauttaa videon keston sekunteina.
+    Ensisijainen: ffprobe. Fallback: OpenCV (cap.get).
+    """
+    # OpenCV-fallback on aina saatavilla — käytetään ensin jos ffprobe puuttuu
+    ffprobe = _find_ffprobe()
+
+    if ffprobe:
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    path,
+                ],
+                capture_output=True, text=True,
+            )
+            return float(result.stdout.strip())
+        except (ValueError, OSError):
+            pass  # laske OpenCV:lla
+
+    # OpenCV-fallback
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or FPS
+    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    cap.release()
+    if frames > 0 and fps > 0:
+        return frames / fps
+    return 0.0
+
+
+def combine_with_transitions(
+    ordered_paths: list[str],
+    out_path: str,
+    fade_duration: float = TRANSITION_DURATION,
+) -> subprocess.CompletedProcess:
+    """
+    Yhdistaa videot fade-to-black -transitioilla ffmpeg filter_complex:lla.
+
+    Strategia per klippi N (paitsi viimeinen):
+      - Fade out: viimeiset `fade_duration` sekuntia
+      - Fade in: ensimmaiset `fade_duration` sekuntia seuraavassa klipissa
+
+    Jos klippeja on vain yksi, kopioidaan suoraan ilman transitioita.
+    """
+    n = len(ordered_paths)
+
+    if n == 1:
+        # Yksittainen klippi: suora kopio
+        cmd = [FFMPEG, "-y", "-i", ordered_paths[0], "-c", "copy", out_path]
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    # Laske klippien kestot
+    durations = [_get_video_duration(p) for p in ordered_paths]
+
+    # ── Rakennetaan filter_complex ────────────────────────────────────────────
+    # Jokaiselle klipille:
+    #   [N:v] fade=t=out:st=<kesto-fade>:d=<fade>,
+    #          fade=t=in:st=0:d=<fade> [vN]
+    #   [N:a] afade=t=out:st=<kesto-fade>:d=<fade>,
+    #          afade=t=in:st=0:d=<fade> [aN]
+    # Lopuksi: concat
+
+    inputs = []
+    for p in ordered_paths:
+        inputs += ["-i", p]
+
+    filter_parts = []
+    v_labels = []
+    a_labels = []
+
+    for i, (path, dur) in enumerate(zip(ordered_paths, durations)):
+        fade_out_start = max(0.0, dur - fade_duration)
+
+        # Video: fade in + fade out (paitsi ensimmainen ei tarvitse fade-in,
+        # paitsi viimeinen ei tarvitse fade-out — mutta symmetria on siistimpi)
+        vf = (
+            f"[{i}:v]"
+            f"fade=t=in:st=0:d={fade_duration},"
+            f"fade=t=out:st={fade_out_start:.4f}:d={fade_duration}"
+            f"[v{i}]"
+        )
+
+        # Audio: sama logiikka
+        af = (
+            f"[{i}:a]"
+            f"afade=t=in:st=0:d={fade_duration},"
+            f"afade=t=out:st={fade_out_start:.4f}:d={fade_duration}"
+            f"[a{i}]"
+        )
+
+        filter_parts.append(vf)
+        filter_parts.append(af)
+        v_labels.append(f"[v{i}]")
+        a_labels.append(f"[a{i}]")
+
+    # concat-filter
+    concat_in = "".join(v_labels) + "".join(a_labels)
+    concat_filter = f"{concat_in}concat=n={n}:v=1:a=1[vout][aout]"
+    filter_parts.append(concat_filter)
+
+    filter_complex = ";".join(filter_parts)
+
+    cmd = [
+        FFMPEG, "-y",
+        *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[vout]",
+        "-map", "[aout]",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        out_path,
+    ]
+
+    print(f"[combine] Yhdistetaan {n} kliippia fade={fade_duration}s transitioilla...")
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+# -------------------------------------------------------------
 # BATCH GPU -PIPELINE
 # -------------------------------------------------------------
 
@@ -381,7 +539,6 @@ def _processor_thread(
     """Annotaatio + maalidetektio + klippien kirjoitus CPU-threadissa."""
     buf_maxlen = int(PRE_GOAL_SECONDS * fps)
 
-    # Pyoriva levypuskuri pre-goal-frameille
     tmpdir = job_dir / "_framebuf"
     tmpdir.mkdir(exist_ok=True)
     disk_buf = DiskFrameBuffer(tmpdir, maxlen=buf_maxlen)
@@ -390,9 +547,9 @@ def _processor_thread(
     seen_events: set = set()
     saving           = False
     post_frames_rem  = 0
-    _post_counter    = 0   # alustetaan funktion tasolla, ei if-lohkossa
+    _post_counter    = 0
     post_tmpdir: Path | None  = None
-    clip_tmpdir: Path | None  = None   # turvakopiot pre-goal-frameista
+    clip_tmpdir: Path | None  = None
 
     clip_pre_paths:  list[str] = []
     clip_post_paths: list[str] = []
@@ -411,7 +568,6 @@ def _processor_thread(
 
         annotated = annotate_frame(raw_frame, r)
 
-        # -- 1. Kirjoita frame pyorivaan levypuskuriin --
         disk_buf.append(annotated)
 
         is_goal     = check_for_goal(r)
@@ -423,10 +579,6 @@ def _processor_thread(
             seen_events.add(event_id)
             last_goal_time = ts
 
-            # -- KORJAUS: kopioi pre-goal-framet turvaan HETI --
-            # Puskuri jatkaa pyorimista post-goal-ajan ja poistaa vanhimpia
-            # tiedostoja. Jos viitataan suoraan puskurin polkuihin, ne voivat
-            # olla poistettuja kun klippi yritetaan koostaa.
             clip_tmpdir = tmpdir / f"clip_{int(time.time()*1000)}"
             clip_tmpdir.mkdir(exist_ok=True)
 
@@ -443,7 +595,6 @@ def _processor_thread(
 
             print(f"[{job_id[:8]}] Kopioitu {len(clip_pre_paths)} pre-goal-framea turvaan.")
 
-            # Oma kansio post-goal-frameille
             post_tmpdir = clip_tmpdir / "post"
             post_tmpdir.mkdir(exist_ok=True)
 
@@ -452,7 +603,6 @@ def _processor_thread(
             post_frames_rem = int(POST_GOAL_SECONDS * fps)
             _post_counter   = 0
 
-        # -- 2. Post-goal: kirjoita suoraan levylle --
         if saving and post_frames_rem > 0:
             name = f"post_{_post_counter:06d}.jpg"
             p    = post_tmpdir / name
@@ -464,7 +614,6 @@ def _processor_thread(
             if post_frames_rem == 0:
                 saving = False
 
-                # -- 3. Kokoa ja tallenna klippi --
                 highlight_count += 1
                 out_name = f"highlight_{highlight_count}_{int(time.time())}.mp4"
                 out_path = str(job_dir / out_name)
@@ -480,7 +629,6 @@ def _processor_thread(
                 )
                 print(f"[{job_id[:8]}] Klippi levylla: {os.path.exists(out_path)}")
 
-                # -- 4. Siivoa turvakopiot heti --
                 try:
                     shutil.rmtree(clip_tmpdir)
                 except OSError:
@@ -500,7 +648,6 @@ def _processor_thread(
 
         jobs[job_id]["processed_frames"] = frame_idx
 
-    # -- Siivoa kaikki valitiedostot jobin paattyessa --
     disk_buf.cleanup()
     if clip_tmpdir and clip_tmpdir.exists():
         shutil.rmtree(clip_tmpdir, ignore_errors=True)
@@ -525,7 +672,7 @@ def run_extraction(job_id: str, video_path: str) -> None:
 
     fps_out = []
     fq = queue.Queue(maxsize=512)
-    rq = queue.Queue(maxsize=128)   # backpressure: estaa rq:n paisumisen
+    rq = queue.Queue(maxsize=128)
 
     t_reader = threading.Thread(
         target=_reader_thread, args=(video_path, fq, fps_out), daemon=True
@@ -690,6 +837,60 @@ def upload_video_url(payload: URLUpload):
     ).start()
 
     return {"job_id": job_id}
+
+
+class CombineRequest(BaseModel):
+    job_id: str
+    filenames: PyList[str]  # tyhjä = kaikki
+
+
+@app.post("/combine/{job_id}")
+def combine_highlights(job_id: str, payload: CombineRequest):
+    job_dir = HIGHLIGHTS_DIR / job_id
+    files = payload.filenames or [
+        h["filename"] for h in jobs.get(job_id, {}).get("highlights", [])
+    ]
+    if not files:
+        raise HTTPException(400, "No files to combine")
+
+    # Varmista jarjestys goal_number mukaan
+    ordered = []
+    h_map = {h["filename"]: h for h in jobs.get(job_id, {}).get("highlights", [])}
+    for fn in sorted(files, key=lambda f: h_map.get(f, {}).get("goal_number", 0)):
+        p = job_dir / fn
+        if p.exists():
+            ordered.append(str(p))
+
+    if not ordered:
+        raise HTTPException(400, "No valid files found")
+
+    out_name = f"full_highlight_{int(time.time())}.mp4"
+    out_path = str(job_dir / out_name)
+
+    # Kaytetaan fade-to-black -transitioita jos klippeja on enemmän kuin yksi
+    result = combine_with_transitions(ordered, out_path, fade_duration=TRANSITION_DURATION)
+
+    if result.returncode != 0:
+        print(f"[combine] FFmpeg virhe: {result.stderr[-500:]}")
+        # Fallback: yksinkertainen concat ilman transitioita
+        list_file = job_dir / "_concat.txt"
+        list_file.write_text("\n".join(f"file '{p}'" for p in ordered), encoding="utf-8")
+        cmd = [
+            FFMPEG, "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(list_file),
+            "-c", "copy",
+            out_path,
+        ]
+        fallback = subprocess.run(cmd, capture_output=True, text=True)
+        list_file.unlink(missing_ok=True)
+        if fallback.returncode != 0:
+            raise HTTPException(500, fallback.stderr[-500:])
+
+    return {
+        "filename": out_name,
+        "url": f"/highlights/{job_id}/{out_name}",
+    }
 
 
 if __name__ == "__main__":
