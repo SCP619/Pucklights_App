@@ -1,6 +1,18 @@
 """
-Hockey Highlight Engine — yhdistetty versio
+Hockey Highlight Engine — muistioptimioitu versio
 FastAPI-backend + batch-GPU-pipeline (TensorRT tai .pt)
+
+Muistioptimoinnit vs. alkuperainen:
+- Pre-goal-buffer kirjoitetaan levylle JPEG:na muistin sijaan (DiskFrameBuffer)
+- Post-goal-framet kirjoitetaan suoraan levylle, ei listaan RAM:iin
+- rq-queue saa maxsize-rajoituksen (backpressure, estaa ylivuodon)
+- Valitiedostot siivotaan heti klippia tallentaessa
+
+Bugikorjaukset:
+- _post_counter alustetaan funktion tasolla (ei if-lohkossa -> ei NameError)
+- Pre-goal-framet kopioidaan turvaan heti maalin havaitsemishetkella,
+  ennen kuin pyoriva puskuri ehtii poistaa ne (oli paasyyongelma)
+- _framebuf-hakemisto poistetaan shutil.rmtreella rmdir:n sijaan
 """
 
 import cv2
@@ -12,7 +24,6 @@ import sys
 import threading
 import time
 import uuid
-from collections import deque
 from pathlib import Path
 
 import aiofiles
@@ -22,52 +33,53 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from ultralytics import YOLO
+from pydantic import BaseModel
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # CONFIG
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 APP_DIR        = Path(__file__).resolve().parent
 
-# Mallipolut — engine on prioriteetti, .pt varavaihtoehto
 ENGINE_PATH    = str(APP_DIR / "HockeyAI_model_weight.engine")
 PT_MODEL_PATH  = str(APP_DIR / "HockeyAI_model_weight.pt")
 MODEL_PATH     = ENGINE_PATH if Path(ENGINE_PATH).exists() else PT_MODEL_PATH
 
-UPLOAD_DIR     = APP_DIR / "uploads"
-HIGHLIGHTS_DIR = APP_DIR / "highlights"
+UPLOAD_DIR           = APP_DIR / "uploads"
+HIGHLIGHTS_DIR       = APP_DIR / "highlights"
+DOWNLOADED_GAMES_DIR = APP_DIR / "downloaded_games"
 UPLOAD_DIR.mkdir(exist_ok=True)
 HIGHLIGHTS_DIR.mkdir(exist_ok=True)
+DOWNLOADED_GAMES_DIR.mkdir(exist_ok=True)
 
-# Batch-koko: TensorRT-engine vaatii kiinteän koon buildaushetkeltä.
-# Jos käytät .pt-mallia, voi olla pienempi.
 BATCH_SIZE        = 16
 PRE_GOAL_SECONDS  = 12
 POST_GOAL_SECONDS = 3
 FPS               = 60
-GLOBAL_COOLDOWN   = 15   # sekuntia maalien välillä
+GLOBAL_COOLDOWN   = 15
 
-# TensorRT engine uudelleenrakentaminen (aja kerran, sitten aseta False)
+# JPEG-laatu levypuskurille: 75-85 on hyva kompromissi laatu/tila
+BUFFER_JPEG_QUALITY = 80
+
 REBUILD_ENGINE = False
 ENGINE_IMGSZ   = 1280
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # GLOBAALI TILA
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 model: YOLO | None = None
 DEVICE = "cpu"
 jobs: dict = {}
 
-# GPU-lukko: vain yksi job kerrallaan GPU:lla
 gpu_lock = threading.Lock()
 
 
-# ─────────────────────────────────────────────────────────────
-# ENGINE EXPORT (aja kerran jos REBUILD_ENGINE=True)
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
+# ENGINE EXPORT
+# -------------------------------------------------------------
 def maybe_rebuild_engine():
     if not REBUILD_ENGINE:
         return
-    print(f"Buildataan TensorRT-engine: batch={BATCH_SIZE}, imgsz={ENGINE_IMGSZ}, half=True …")
+    print(f"Buildataan TensorRT-engine: batch={BATCH_SIZE}, imgsz={ENGINE_IMGSZ}, half=True ...")
     m = YOLO(PT_MODEL_PATH)
     m.export(
         format="engine",
@@ -80,9 +92,9 @@ def maybe_rebuild_engine():
     print("Engine valmis. Aseta REBUILD_ENGINE=False.")
 
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # FFMPEG
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 def get_ffmpeg_path() -> str:
     venv_bin = os.path.dirname(sys.executable)
     for candidate in ("ffmpeg.exe", "ffmpeg"):
@@ -108,11 +120,10 @@ FFMPEG = get_ffmpeg_path()
 print(f"FFmpeg: {FFMPEG}")
 
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # MAALIDETEKTIO
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 def check_for_goal(r) -> bool:
-    """Tarkistaa onko kiekko laajennetussa maalialueessa (yksittäinen tulos)."""
     puck_box = None
     goal_box = None
 
@@ -131,15 +142,18 @@ def check_for_goal(r) -> bool:
 
         gx_c = (goal_box[0] + goal_box[2]) / 2
         gy_c = (goal_box[1] + goal_box[3]) / 2
-        gw   = (goal_box[2] - goal_box[0]) * 2
-        gh   = (goal_box[3] - goal_box[1]) * 3
 
-        exp = [
-            gx_c - gw / 2,
-            gy_c - gh / 2,
-            gx_c + gw / 2,
-            gy_c + gh / 2,
-        ]
+        gw = (goal_box[2] - goal_box[0]) * 2
+        gh = (goal_box[3] - goal_box[1]) * 1.5
+
+        x_left  = gx_c - gw / 2
+        x_right = gx_c + gw / 2
+
+        # FIX: Y alkaa keskeltä ja laajenee vain alaspäin
+        y_top    = gy_c
+        y_bottom = gy_c + gh
+
+        exp = [x_left, y_top, x_right, y_bottom]
 
         if exp[0] < px < exp[2] and exp[1] < py < exp[3]:
             return True
@@ -147,9 +161,9 @@ def check_for_goal(r) -> bool:
     return False
 
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # ANNOTAATIO
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 def annotate_frame(frame, r):
     for box in r.boxes:
         cls_id = int(box.cls[0])
@@ -163,9 +177,23 @@ def annotate_frame(frame, r):
 
             gx_c = (x1 + x2) / 2
             gy_c = (y1 + y2) / 2
-            gw   = (x2 - x1) * 2
-            gh   = (y2 - y1) * 3
-            exp  = [int(gx_c - gw/2), int(gy_c - gh / 2), int(gx_c + gw/2), int(gy_c + gh/2)]
+
+            gw = (x2 - x1) * 2
+            gh = (y2 - y1) * 1.5
+
+            x_left  = gx_c - gw / 2
+            x_right = gx_c + gw / 2
+
+            # FIX: vain alaspäin
+            y_top    = gy_c
+            y_bottom = gy_c + gh
+
+            exp = [
+                int(x_left),
+                int(y_top),
+                int(x_right),
+                int(y_bottom)
+            ]
             cv2.rectangle(frame, (exp[0], exp[1]), (exp[2], exp[3]), (0, 255, 0), 2)
             cv2.putText(frame, "Goal Zone 3x", (exp[0], exp[1] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
@@ -178,29 +206,92 @@ def annotate_frame(frame, r):
     return frame
 
 
-# ─────────────────────────────────────────────────────────────
-# KLIPPIEN TALLENNUS FFMPEG:LLÄ (audio mukaan)
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
+# LEVYPUSKURI
+# Korvaa deque(annotated_frames): kirjoittaa jokaisen annotoidun
+# framen JPEG:na levylle, pitaa vain tiedostonimet muistissa.
+# -------------------------------------------------------------
+class DiskFrameBuffer:
+    """
+    Rengaspuskuri joka tallentaa framet JPEG-tiedostoina levylle.
+    Muistissa pidetaan vain tiedostonimet (merkkijonot).
+    """
+
+    def __init__(self, tmpdir: Path, maxlen: int, quality: int = BUFFER_JPEG_QUALITY):
+        self.tmpdir   = tmpdir
+        self.maxlen   = maxlen
+        self.quality  = quality
+        self._names: list[str] = []
+        self._counter = 0
+
+    def append(self, frame) -> None:
+        name = f"buf_{self._counter:08d}.jpg"
+        path = self.tmpdir / name
+        cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
+        self._counter += 1
+        self._names.append(name)
+
+        # Poista vanhin jos puskuri taynna
+        if len(self._names) > self.maxlen:
+            old = self._names.pop(0)
+            try:
+                (self.tmpdir / old).unlink()
+            except OSError:
+                pass
+
+    def snapshot_paths(self) -> list[str]:
+        """Palauttaa absoluuttiset polut jarjestyksessa (vanhin ensin)."""
+        return [str(self.tmpdir / n) for n in self._names]
+
+    def start_frame_index(self, current_frame_idx: int) -> int:
+        return max(0, current_frame_idx - len(self._names) + 1)
+
+    def cleanup(self) -> None:
+        for name in self._names:
+            try:
+                (self.tmpdir / name).unlink()
+            except OSError:
+                pass
+        self._names.clear()
+
+
+# -------------------------------------------------------------
+# KLIPPIEN TALLENNUS
+# -------------------------------------------------------------
 def save_highlight_with_audio(
-    frames: list,
+    frame_paths: list[str],
     out_path: str,
     source_video: str,
     buffer_start_frame: int,
     fps: float,
 ) -> None:
-    if not frames:
-        print("⚠️  Tyhjä framelista — ohitetaan.")
+    if not frame_paths:
+        print("  Tyhja framelista -- ohitetaan.")
         return
 
-    h, w, _ = frames[0].shape
-    duration   = len(frames) / fps
+    first = cv2.imread(frame_paths[0])
+    if first is None:
+        print(f"  Ensimmaista framea ei voitu lukea: {frame_paths[0]}")
+        return
+
+    h, w, _ = first.shape
+    duration   = len(frame_paths) / fps
     start_time = buffer_start_frame / fps
 
     tmp_path = out_path.replace(".mp4", "_noaudio.mp4")
     out = cv2.VideoWriter(tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    for f in frames:
-        out.write(f)
+
+    missing = 0
+    for p in frame_paths:
+        f = cv2.imread(p)
+        if f is not None:
+            out.write(f)
+        else:
+            missing += 1
     out.release()
+
+    if missing:
+        print(f"  Varoitus: {missing}/{len(frame_paths)} framea puuttui levylta.")
 
     cmd = [
         FFMPEG, "-y",
@@ -224,11 +315,9 @@ def save_highlight_with_audio(
         os.rename(tmp_path, out_path)
 
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # BATCH GPU -PIPELINE
-# Kolme threadia: reader → gpu_worker → processor
-# gpu_lock estää useiden jobien samanaikaisen GPU-käytön
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 
 def _reader_thread(video_path: str, fq: queue.Queue, fps_out: list):
     cap = cv2.VideoCapture(video_path)
@@ -247,11 +336,11 @@ def _reader_thread(video_path: str, fq: queue.Queue, fps_out: list):
         frame_id += 1
 
     cap.release()
-    fq.put(None)  # sentinel
+    fq.put(None)
 
 
 def _gpu_worker_thread(fq: queue.Queue, rq: queue.Queue):
-    """Batch predict GPU-threadissa. gpu_lock on jo hankittu ulkopuolella."""
+    """Batch predict. gpu_lock on jo hankittu ulkopuolella."""
     batch_frames = []
     batch_times  = []
 
@@ -279,7 +368,7 @@ def _gpu_worker_thread(fq: queue.Queue, rq: queue.Queue):
             batch_frames = []
             batch_times  = []
 
-    rq.put(None)  # sentinel
+    rq.put(None)
 
 
 def _processor_thread(
@@ -290,15 +379,27 @@ def _processor_thread(
     fps: float,
 ):
     """Annotaatio + maalidetektio + klippien kirjoitus CPU-threadissa."""
-    buffer         = deque(maxlen=int(PRE_GOAL_SECONDS * fps))
-    last_goal_time = -999.0
-    seen_events    = set()
-    saving         = False
-    post_frames    = 0
-    goal_frames    = []
-    goal_start_idx = 0
-    frame_idx      = 0
-    highlight_count = 0
+    buf_maxlen = int(PRE_GOAL_SECONDS * fps)
+
+    # Pyoriva levypuskuri pre-goal-frameille
+    tmpdir = job_dir / "_framebuf"
+    tmpdir.mkdir(exist_ok=True)
+    disk_buf = DiskFrameBuffer(tmpdir, maxlen=buf_maxlen)
+
+    last_goal_time  = -999.0
+    seen_events: set = set()
+    saving           = False
+    post_frames_rem  = 0
+    _post_counter    = 0   # alustetaan funktion tasolla, ei if-lohkossa
+    post_tmpdir: Path | None  = None
+    clip_tmpdir: Path | None  = None   # turvakopiot pre-goal-frameista
+
+    clip_pre_paths:  list[str] = []
+    clip_post_paths: list[str] = []
+    clip_start_idx   = 0
+
+    frame_idx        = 0
+    highlight_count  = 0
 
     while True:
         item = rq.get()
@@ -309,10 +410,12 @@ def _processor_thread(
         frame_idx += 1
 
         annotated = annotate_frame(raw_frame, r)
-        buffer.append(annotated)
 
-        is_goal    = check_for_goal(r)
-        event_id   = int(ts * 2)
+        # -- 1. Kirjoita frame pyorivaan levypuskuriin --
+        disk_buf.append(annotated)
+
+        is_goal     = check_for_goal(r)
+        event_id    = int(ts * 2)
         cooldown_ok = (ts - last_goal_time) > GLOBAL_COOLDOWN
 
         if is_goal and cooldown_ok and event_id not in seen_events:
@@ -320,29 +423,72 @@ def _processor_thread(
             seen_events.add(event_id)
             last_goal_time = ts
 
-            goal_frames    = list(buffer)
-            goal_start_idx = max(0, frame_idx - len(goal_frames))
-            saving      = True
-            post_frames = int(POST_GOAL_SECONDS * fps)
+            # -- KORJAUS: kopioi pre-goal-framet turvaan HETI --
+            # Puskuri jatkaa pyorimista post-goal-ajan ja poistaa vanhimpia
+            # tiedostoja. Jos viitataan suoraan puskurin polkuihin, ne voivat
+            # olla poistettuja kun klippi yritetaan koostaa.
+            clip_tmpdir = tmpdir / f"clip_{int(time.time()*1000)}"
+            clip_tmpdir.mkdir(exist_ok=True)
 
-        if saving:
-            goal_frames.append(annotated)
+            clip_pre_paths = []
+            clip_start_idx = disk_buf.start_frame_index(frame_idx)
 
-        if post_frames > 0:
-            post_frames -= 1
-            if post_frames == 0:
+            for src in disk_buf.snapshot_paths():
+                dst = clip_tmpdir / Path(src).name
+                try:
+                    shutil.copy2(src, dst)
+                    clip_pre_paths.append(str(dst))
+                except OSError as e:
+                    print(f"  Varoitus: pre-framen kopiointi epaonnistui: {e}")
+
+            print(f"[{job_id[:8]}] Kopioitu {len(clip_pre_paths)} pre-goal-framea turvaan.")
+
+            # Oma kansio post-goal-frameille
+            post_tmpdir = clip_tmpdir / "post"
+            post_tmpdir.mkdir(exist_ok=True)
+
+            clip_post_paths = []
+            saving          = True
+            post_frames_rem = int(POST_GOAL_SECONDS * fps)
+            _post_counter   = 0
+
+        # -- 2. Post-goal: kirjoita suoraan levylle --
+        if saving and post_frames_rem > 0:
+            name = f"post_{_post_counter:06d}.jpg"
+            p    = post_tmpdir / name
+            cv2.imwrite(str(p), annotated, [cv2.IMWRITE_JPEG_QUALITY, BUFFER_JPEG_QUALITY])
+            clip_post_paths.append(str(p))
+            _post_counter  += 1
+            post_frames_rem -= 1
+
+            if post_frames_rem == 0:
                 saving = False
+
+                # -- 3. Kokoa ja tallenna klippi --
                 highlight_count += 1
                 out_name = f"highlight_{highlight_count}_{int(time.time())}.mp4"
                 out_path = str(job_dir / out_name)
 
+                all_paths = clip_pre_paths + clip_post_paths
+                print(f"[{job_id[:8]}] Tallennetaan klippi: {len(all_paths)} framea -> {out_name}")
                 save_highlight_with_audio(
-                    frames=goal_frames,
+                    frame_paths=all_paths,
                     out_path=out_path,
                     source_video=video_path,
-                    buffer_start_frame=goal_start_idx,
+                    buffer_start_frame=clip_start_idx,
                     fps=fps,
                 )
+                print(f"[{job_id[:8]}] Klippi levylla: {os.path.exists(out_path)}")
+
+                # -- 4. Siivoa turvakopiot heti --
+                try:
+                    shutil.rmtree(clip_tmpdir)
+                except OSError:
+                    pass
+                clip_tmpdir     = None
+                post_tmpdir     = None
+                clip_pre_paths  = []
+                clip_post_paths = []
 
                 jobs[job_id]["highlights"].append({
                     "filename":    out_name,
@@ -350,14 +496,18 @@ def _processor_thread(
                     "timestamp":   round(ts, 1),
                     "goal_number": highlight_count,
                 })
-                goal_frames = []
-                print(f"\n[{job_id[:8]}] Klippi tallennettu: {out_name}")
+                print(f"[{job_id[:8]}] Klippi tallennettu: {out_name}")
 
         jobs[job_id]["processed_frames"] = frame_idx
 
+    # -- Siivoa kaikki valitiedostot jobin paattyessa --
+    disk_buf.cleanup()
+    if clip_tmpdir and clip_tmpdir.exists():
+        shutil.rmtree(clip_tmpdir, ignore_errors=True)
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 def run_extraction(job_id: str, video_path: str) -> None:
-    """Käynnistää kolme threadia ja odottaa niiden valmistumista."""
     cap          = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     raw_fps      = cap.get(cv2.CAP_PROP_FPS)
@@ -373,20 +523,19 @@ def run_extraction(job_id: str, video_path: str) -> None:
         "processed_frames": 0,
     })
 
-    fq = queue.Queue(maxsize=512)
-    rq = queue.Queue()
     fps_out = []
+    fq = queue.Queue(maxsize=512)
+    rq = queue.Queue(maxsize=128)   # backpressure: estaa rq:n paisumisen
 
     t_reader = threading.Thread(
         target=_reader_thread, args=(video_path, fq, fps_out), daemon=True
     )
 
     def gpu_wrapper():
-        with gpu_lock:   # ← yksi job kerrallaan GPU:lla
+        with gpu_lock:
             _gpu_worker_thread(fq, rq)
 
-    t_gpu = threading.Thread(target=gpu_wrapper, daemon=True)
-
+    t_gpu  = threading.Thread(target=gpu_wrapper, daemon=True)
     t_proc = threading.Thread(
         target=_processor_thread,
         args=(rq, job_id, job_dir, video_path, fps),
@@ -415,9 +564,9 @@ def run_extraction(job_id: str, video_path: str) -> None:
             pass
 
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # FASTAPI
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global model, DEVICE
@@ -426,9 +575,9 @@ async def lifespan(app: FastAPI):
     maybe_rebuild_engine()
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"🚀 Ladataan YOLO-malli ({MODEL_PATH}) laitteella {DEVICE} …")
+    print(f"Ladataan YOLO-malli ({MODEL_PATH}) laitteella {DEVICE} ...")
     model = YOLO(MODEL_PATH)
-    print("✅ Malli valmis.")
+    print("Malli valmis.")
     yield
 
 
@@ -502,6 +651,45 @@ async def delete_highlight(job_id: str, filename: str):
             h for h in jobs[job_id]["highlights"] if h["filename"] != safe
         ]
     return {"deleted": safe}
+
+
+class URLUpload(BaseModel):
+    url: str
+
+
+@app.post("/upload-url")
+def upload_video_url(payload: URLUpload):
+    job_id    = str(uuid.uuid4())
+    save_path = DOWNLOADED_GAMES_DIR / f"{job_id}.mp4"
+
+    cmd = [
+        FFMPEG,
+        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,data",
+        "-i", payload.url,
+        "-c", "copy",
+        str(save_path),
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        raise HTTPException(status_code=400, detail=result.stderr[-1000:])
+
+    jobs[job_id] = {
+        "status":           "queued",
+        "total_frames":     1,
+        "processed_frames": 0,
+        "highlights":       [],
+        "error":            None,
+    }
+
+    threading.Thread(
+        target=run_extraction,
+        args=(job_id, str(save_path)),
+        daemon=True,
+    ).start()
+
+    return {"job_id": job_id}
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ void main() {
 
 class PuckLightsApp extends StatelessWidget {
   const PuckLightsApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -48,6 +49,7 @@ class PuckLightsApp extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
+
   @override
   State<MainShell> createState() => _MainShellState();
 }
@@ -63,56 +65,87 @@ class _MainShellState extends State<MainShell> {
   @override
   void initState() {
     super.initState();
+
     SharedPreferences.getInstance().then((p) {
       final saved = p.getString('server_url');
+
       setState(() => _serverUrl = saved ?? '');
-      // First launch — open settings so user can enter the server URL
+
       if (saved == null || saved.isEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) => _showSettings());
       }
     });
   }
 
-  void _onHighlightsReady(List<Map<String, dynamic>> h) =>
-      setState(() { _highlights = h; _tab = 1; });
+  void _onHighlightsReady(List<Map<String, dynamic>> h) {
+    setState(() {
+      _highlights = h;
+      _tab = 1;
+    });
+  }
 
-  void _toggleFavorite(String fn) => setState(() {
-    _favorites.contains(fn) ? _favorites.remove(fn) : _favorites.add(fn);
-  });
+  void _toggleFavorite(String fn) {
+    setState(() {
+      _favorites.contains(fn)
+          ? _favorites.remove(fn)
+          : _favorites.add(fn);
+    });
+  }
 
   void _showSettings() {
     final ctrl = TextEditingController(text: _serverUrl);
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kCard,
-        title: const Text('Server URL', style: TextStyle(color: kWhite)),
+        title: const Text(
+          'Server URL',
+          style: TextStyle(color: kWhite),
+        ),
         content: TextField(
           controller: ctrl,
           style: const TextStyle(color: kWhite),
           decoration: const InputDecoration(
             hintText: 'https://xxxx.trycloudflare.com',
             hintStyle: TextStyle(color: kGrey),
-            helperText: 'Cloudflare: https://xxxx.trycloudflare.com\nUSB only: http://10.0.2.2:8000',
+            helperText:
+                'Cloudflare: https://xxxx.trycloudflare.com\nUSB only: http://10.0.2.2:8000',
             helperStyle: TextStyle(color: kGrey, fontSize: 11),
             helperMaxLines: 2,
-            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: kGrey)),
-            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: kOrange)),
+            enabledBorder: UnderlineInputBorder(
+              borderSide: BorderSide(color: kGrey),
+            ),
+            focusedBorder: UnderlineInputBorder(
+              borderSide: BorderSide(color: kOrange),
+            ),
           ),
           keyboardType: TextInputType.url,
           autocorrect: false,
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: kGrey))),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: kGrey),
+            ),
+          ),
           TextButton(
             onPressed: () async {
               final url = ctrl.text.trim();
+
               final prefs = await SharedPreferences.getInstance();
               await prefs.setString('server_url', url);
+
               setState(() => _serverUrl = url);
+
               if (ctx.mounted) Navigator.pop(ctx);
             },
-            child: const Text('Save', style: TextStyle(color: kOrange)),
+            child: const Text(
+              'Save',
+              style: TextStyle(color: kOrange),
+            ),
           ),
         ],
       ),
@@ -121,7 +154,9 @@ class _MainShellState extends State<MainShell> {
 
   @override
   Widget build(BuildContext context) {
-    final favHighlights = _highlights.where((h) => _favorites.contains(h['filename'])).toList();
+    final favHighlights = _highlights
+        .where((h) => _favorites.contains(h['filename']))
+        .toList();
 
     return Scaffold(
       backgroundColor: kBg,
@@ -129,8 +164,14 @@ class _MainShellState extends State<MainShell> {
         backgroundColor: kBg,
         elevation: 0,
         centerTitle: true,
-        title: const Text('PuckLights 🏒',
-            style: TextStyle(color: kWhite, fontWeight: FontWeight.bold, fontSize: 20)),
+        title: const Text(
+          'PuckLights 🏒',
+          style: TextStyle(
+            color: kWhite,
+            fontWeight: FontWeight.bold,
+            fontSize: 20,
+          ),
+        ),
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 16),
@@ -139,22 +180,42 @@ class _MainShellState extends State<MainShell> {
               child: const CircleAvatar(
                 radius: 16,
                 backgroundColor: kBtn,
-                child: Icon(Icons.person_outline, color: kGrey, size: 20),
+                child: Icon(
+                  Icons.person_outline,
+                  color: kGrey,
+                  size: 20,
+                ),
               ),
             ),
           ),
         ],
       ),
-      body: IndexedStack(index: _tab, children: [
-        UploadTab(baseUrl: _baseUrl, onHighlightsReady: _onHighlightsReady),
-        HighlightsTab(baseUrl: _baseUrl, highlights: _highlights,
-            favorites: _favorites, onToggleFavorite: _toggleFavorite),
-        FavoritesTab(baseUrl: _baseUrl, highlights: favHighlights,
-            favorites: _favorites, onToggleFavorite: _toggleFavorite),
-      ]),
+      body: IndexedStack(
+        index: _tab,
+        children: [
+          UploadTab(
+            baseUrl: _baseUrl,
+            onHighlightsReady: _onHighlightsReady,
+          ),
+          HighlightsTab(
+            baseUrl: _baseUrl,
+            highlights: _highlights,
+            favorites: _favorites,
+            onToggleFavorite: _toggleFavorite,
+          ),
+          FavoritesTab(
+            baseUrl: _baseUrl,
+            highlights: favHighlights,
+            favorites: _favorites,
+            onToggleFavorite: _toggleFavorite,
+          ),
+        ],
+      ),
       bottomNavigationBar: Container(
         decoration: const BoxDecoration(
-          border: Border(top: BorderSide(color: kBtn, width: 1)),
+          border: Border(
+            top: BorderSide(color: kBtn, width: 1),
+          ),
         ),
         child: BottomNavigationBar(
           currentIndex: _tab,
@@ -166,9 +227,18 @@ class _MainShellState extends State<MainShell> {
           unselectedFontSize: 12,
           type: BottomNavigationBarType.fixed,
           items: const [
-            BottomNavigationBarItem(icon: Icon(Icons.upload_rounded), label: 'Upload'),
-            BottomNavigationBarItem(icon: Icon(Icons.play_circle_outline_rounded), label: 'Highlights'),
-            BottomNavigationBarItem(icon: Icon(Icons.favorite_border_rounded), label: 'Favorites'),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.upload_rounded),
+              label: 'Upload',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.play_circle_outline_rounded),
+              label: 'Highlights',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.favorite_border_rounded),
+              label: 'Favorites',
+            ),
           ],
         ),
       ),
@@ -182,134 +252,358 @@ class _MainShellState extends State<MainShell> {
 class UploadTab extends StatefulWidget {
   final String baseUrl;
   final void Function(List<Map<String, dynamic>>) onHighlightsReady;
-  const UploadTab({super.key, required this.baseUrl, required this.onHighlightsReady});
+
+  const UploadTab({
+    super.key,
+    required this.baseUrl,
+    required this.onHighlightsReady,
+  });
+
   @override
   State<UploadTab> createState() => _UploadTabState();
 }
 
 class _UploadTabState extends State<UploadTab> {
   File? _file;
+
   bool _uploading = false;
+
   double _progress = 0;
+
+  final TextEditingController _urlController = TextEditingController();
 
   Future<void> _pick() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.video,
       allowMultiple: false,
     );
+
     if (result != null && result.files.single.path != null) {
-      setState(() => _file = File(result.files.single.path!));
+      setState(() {
+        _file = File(result.files.single.path!);
+      });
     }
   }
 
   Future<void> _upload() async {
     if (_file == null) return;
+
     if (widget.baseUrl.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Set a server URL first — tap the profile icon.'),
-        backgroundColor: Colors.orange));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Set a server URL first — tap the profile icon.',
+          ),
+          backgroundColor: Colors.orange,
+        ),
+      );
       return;
     }
-    setState(() { _uploading = true; _progress = 0; });
+
+    setState(() {
+      _uploading = true;
+      _progress = 0;
+    });
+
     try {
-      final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 30),
-        sendTimeout: const Duration(minutes: 10),   // large video uploads can take time
-        receiveTimeout: const Duration(seconds: 60),
-      ));
+      final dio = Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 30),
+          sendTimeout: const Duration(minutes: 10),
+          receiveTimeout: const Duration(seconds: 60),
+        ),
+      );
+
       final res = await dio.post(
         '${widget.baseUrl}/upload',
         data: FormData.fromMap({
-          'file': await MultipartFile.fromFile(_file!.path, filename: 'hockey.mp4'),
+          'file': await MultipartFile.fromFile(
+            _file!.path,
+            filename: 'hockey.mp4',
+          ),
         }),
         onSendProgress: (s, t) {
-          if (t > 0 && mounted) setState(() => _progress = s / t);
+          if (t > 0 && mounted) {
+            setState(() => _progress = s / t);
+          }
         },
       );
+
       if (!mounted) return;
-      Navigator.push(context, MaterialPageRoute(
-        builder: (_) => ProcessingScreen(
-          jobId: res.data['job_id'] as String,
-          baseUrl: widget.baseUrl,
-          onDone: (h) { widget.onHighlightsReady(h); Navigator.pop(context); },
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ProcessingScreen(
+            jobId: res.data['job_id'] as String,
+            baseUrl: widget.baseUrl,
+            onDone: (h) {
+              widget.onHighlightsReady(h);
+              Navigator.pop(context);
+            },
+          ),
         ),
-      ));
+      );
     } on DioException catch (e) {
-      final msg = 'Upload failed\ntype: ${e.type.name}\nstatus: ${e.response?.statusCode}\nerror: ${e.error}';
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), backgroundColor: Colors.red, duration: const Duration(seconds: 12)));
+      final msg =
+          'Upload failed\ntype: ${e.type.name}\nstatus: ${e.response?.statusCode}\nerror: ${e.error}';
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(msg),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 12),
+          ),
+        );
+      }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: $e'), backgroundColor: Colors.red, duration: const Duration(seconds: 12)));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Upload failed: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 12),
+          ),
+        );
+      }
     } finally {
-      if (mounted) setState(() => _uploading = false);
+      if (mounted) {
+        setState(() => _uploading = false);
+      }
     }
+  }
+
+  Future<void> _uploadFromUrl() async {
+    final url = _urlController.text.trim();
+
+    if (url.isEmpty) return;
+
+    if (widget.baseUrl.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Set a server URL first — tap the profile icon.',
+          ),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _uploading = true;
+      _progress = 0;
+    });
+
+    try {
+      final dio = Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 30),
+          receiveTimeout: const Duration(minutes: 10),
+        ),
+      );
+
+      final res = await dio.post(
+        '${widget.baseUrl}/upload-url',
+        data: {
+          'url': url,
+        },
+      );
+
+      if (!mounted) return;
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ProcessingScreen(
+            jobId: res.data['job_id'] as String,
+            baseUrl: widget.baseUrl,
+            onDone: (h) {
+              widget.onHighlightsReady(h);
+              Navigator.pop(context);
+            },
+          ),
+        ),
+      );
+    } on DioException catch (e) {
+      final msg =
+          'URL upload failed\ntype: ${e.type.name}\nstatus: ${e.response?.statusCode}\nerror: ${e.error}';
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(msg),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 12),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('URL upload failed: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 12),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _uploading = false);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 32),
-      child: Column(children: [
-        const Spacer(flex: 2),
+      child: Column(
+        children: [
+          const Spacer(flex: 2),
 
-        // Film icon
-        Container(
-          width: 96, height: 96,
-          decoration: BoxDecoration(
-            border: Border.all(color: kGrey.withValues(alpha: 0.5), width: 2),
-            borderRadius: BorderRadius.circular(14),
+          Container(
+            width: 96,
+            height: 96,
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: kGrey.withValues(alpha: 0.5),
+                width: 2,
+              ),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Positioned(top: 10, child: _dots()),
+                Positioned(bottom: 10, child: _dots()),
+                const Icon(
+                  Icons.play_arrow_rounded,
+                  color: kWhite,
+                  size: 38,
+                ),
+              ],
+            ),
           ),
-          child: Stack(alignment: Alignment.center, children: [
-            Positioned(top: 10, child: _dots()),
-            Positioned(bottom: 10, child: _dots()),
-            const Icon(Icons.play_arrow_rounded, color: kWhite, size: 38),
-          ]),
-        ),
-        const SizedBox(height: 18),
-        Text(
-          _file == null ? 'Upload your video to create highlights' : _file!.path.split('/').last,
-          style: const TextStyle(color: kGrey, fontSize: 14),
-          textAlign: TextAlign.center,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
 
-        const Spacer(flex: 2),
+          const SizedBox(height: 18),
 
-        if (_uploading) ...[
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(value: _progress, backgroundColor: kBtn, color: kOrange, minHeight: 6),
+          Text(
+            _file == null
+                ? 'Upload your video to create highlights'
+                : _file!.path.split('/').last,
+            style: const TextStyle(
+              color: kGrey,
+              fontSize: 14,
+            ),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
-          const SizedBox(height: 8),
-          Text('Uploading… ${(_progress * 100).toStringAsFixed(0)}%',
-              style: const TextStyle(color: kGrey, fontSize: 13)),
-          const SizedBox(height: 20),
-        ],
 
-        _PillButton(label: 'Select from Gallery', onTap: _uploading ? null : _pick),
-        const SizedBox(height: 14),
-        _PillButton(label: 'Browse files', onTap: _uploading ? null : _pick),
+          const SizedBox(height: 24),
 
-        if (_file != null && !_uploading) ...[
+          TextField(
+            controller: _urlController,
+            style: const TextStyle(color: kWhite),
+            decoration: InputDecoration(
+              hintText: 'Paste video URL...',
+              hintStyle: const TextStyle(color: kGrey),
+              filled: true,
+              fillColor: kCard,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+
+          const Spacer(flex: 2),
+
+          if (_uploading) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: _progress > 0 ? _progress : null,
+                backgroundColor: kBtn,
+                color: kOrange,
+                minHeight: 6,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _progress > 0
+                  ? 'Uploading… ${(_progress * 100).toStringAsFixed(0)}%'
+                  : 'Processing...',
+              style: const TextStyle(
+                color: kGrey,
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(height: 20),
+          ],
+
+          _PillButton(
+            label: 'Select from Gallery',
+            onTap: _uploading ? null : _pick,
+          ),
+
           const SizedBox(height: 14),
-          _PillButton(label: 'Extract Highlights', onTap: _upload, color: kOrange, textColor: Colors.black),
-        ],
 
-        const Spacer(),
-      ]),
+          _PillButton(
+            label: 'Browse files',
+            onTap: _uploading ? null : _pick,
+          ),
+
+          const SizedBox(height: 14),
+
+          _PillButton(
+            label: 'Upload from URL',
+            onTap: _uploading ? null : _uploadFromUrl,
+          ),
+
+          if (_file != null && !_uploading) ...[
+            const SizedBox(height: 14),
+
+            _PillButton(
+              label: 'Extract Highlights',
+              onTap: _upload,
+              color: kOrange,
+              textColor: Colors.black,
+            ),
+          ],
+
+          const Spacer(),
+        ],
+      ),
     );
   }
 
-  Widget _dots() => Row(
-    mainAxisSize: MainAxisSize.min,
-    children: List.generate(4, (_) => Container(
-      width: 7, height: 7,
-      margin: const EdgeInsets.symmetric(horizontal: 3),
-      decoration: BoxDecoration(color: kGrey.withValues(alpha: 0.5), borderRadius: BorderRadius.circular(2)),
-    )),
-  );
+  Widget _dots() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(
+        4,
+        (_) => Container(
+          width: 7,
+          height: 7,
+          margin: const EdgeInsets.symmetric(horizontal: 3),
+          decoration: BoxDecoration(
+            color: kGrey.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
